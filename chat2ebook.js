@@ -207,6 +207,23 @@ function getTextGenPresetScripts() {
     return [];
 }
 
+// JS-Slash-Runner / TavernHelper 当前脚本的“区域”正则。
+// 这些正则不会出现在全局、角色卡或预设设置中，需要通过 TavernHelper 读取。
+function getScopedRegexScripts() {
+    try {
+        const helper = window.TavernHelper || window.tavernHelper;
+        if (!helper || typeof helper.getTavernRegexes !== 'function') return [];
+        const all = helper.getTavernRegexes({}) || [];
+        if (!Array.isArray(all)) return [];
+        return all
+            .filter(s => s && ['scoped', 'script', 'local'].includes(String(s.scope || '').toLowerCase()))
+            .map(s => ({ ...s, _source: 'Scoped' }));
+    } catch (e) {
+        console.warn('[Chat2Ebook Safe] 无法读取区域正则：', e);
+        return [];
+    }
+}
+
 function getAllRegexScripts() {
     let allScripts = [];
     const globalSettings = (typeof window !== 'undefined' && window.extension_settings) ? window.extension_settings : extension_settings;
@@ -227,6 +244,9 @@ function getAllRegexScripts() {
 
     const presetScripts = getTextGenPresetScripts();
     allScripts = allScripts.concat(presetScripts);
+
+    const scopedScripts = getScopedRegexScripts();
+    allScripts = allScripts.concat(scopedScripts);
 
     let normalized = allScripts.map(normalizeScript);
     const active = normalized.filter(s => !s.disabled && s.enabled !== false && s._pattern);
@@ -259,6 +279,7 @@ function renderText(rawText, isUser, scripts, depth, debugMode = false) {
         
         let depthMatch = true;
         if (script._minDepth !== null && depth < script._minDepth) depthMatch = false;
+        if (script._maxDepth !== null && depth > script._maxDepth) depthMatch = false;
 
         if (isTarget && depthMatch) {
             text = applyScript(text, script, debugMode);

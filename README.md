@@ -7,7 +7,7 @@
 - 导出 EPUB 与 TXT。
 - 选择楼层范围、是否包含用户或 AI、隐藏 AI 名称。
 - EPUB 分章。
-- 继续应用 SillyTavern 的全局、角色卡及当前预设正则。
+- 继续应用 SillyTavern 的全局、角色卡、当前预设及 TavernHelper 区域正则。
 - 保留安全的 Markdown 与常见排版效果。
 
 ## 安全调整

@@ -6,6 +6,6 @@
     "js": "chat2ebook.js",
     "css": "style.css",
     "author": "六点儿水",
-    "version": "0.1.0-safe.1",
+    "version": "0.1.0-safe.2",
     "description": "安全版聊天导出：仅支持 EPUB/TXT，保留正则与安全排版，不加载远端脚本。"
 }
