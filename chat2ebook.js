@@ -13,7 +13,8 @@ const LIB_SOURCES = {
 
 const defaultSettings = {
     title: "Chat2Ebook", author: "", exportStart: 0, exportEnd: 99999,
-    exportUser: false, exportAI: true, hideAIName: true, chapterSplit: 1
+    exportUser: false, exportAI: true, hideAIName: true, chapterSplit: 1,
+    allowExternalImages: false
 };
 
 let settings = {};
@@ -92,13 +93,33 @@ function isSafeHref(value) {
 }
 
 function isSafeImage(value) {
-    return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(String(value || '').trim());
+    const v = String(value || '').trim();
+    return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(v)
+        || (settings.allowExternalImages && /^https:\/\/[^\s]+$/i.test(v));
+}
+
+function sanitizeCssUrls(value) {
+    return String(value || '').replace(/url\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi, (whole, dq, sq, bare) => {
+        const url = String(dq ?? sq ?? bare ?? '').trim();
+        if (!isSafeImage(url)) return 'none';
+        return `url("${url.replace(/[\\"]/g, '\\$&')}")`;
+    });
 }
 
 function sanitizeStyle(value) {
-    const v = String(value || '');
-    if (/url\s*\(|expression\s*\(|@import|javascript:|behavior\s*:|-moz-binding/i.test(v)) return '';
+    let v = sanitizeCssUrls(value);
+    if (/expression\s*\(|@import|javascript:|behavior\s*:|-moz-binding/i.test(v)) return '';
     return v.slice(0, 4000);
+}
+
+function sanitizeStylesheet(value) {
+    let v = String(value || '').slice(0, 50000);
+    // EPUB 可保留本地 CSS 排版与动画，但不得自动请求外部资源或使用旧式可执行 CSS。
+    v = v.replace(/@import[\s\S]*?;/gi, '');
+    v = sanitizeCssUrls(v);
+    v = v.replace(/(?:expression|image-set|-webkit-image-set)\s*\([^)]*\)/gi, 'none');
+    v = v.replace(/(?:behavior|-moz-binding)\s*:[^;}]+;?/gi, '');
+    return v;
 }
 
 // 保留常见排版，但移除可执行内容、自动联网资源和危险 URL。
@@ -108,7 +129,12 @@ function cleanHtml(htmlContent, mode = 'epub') {
     template.innerHTML = String(htmlContent || '');
     const root = template.content;
     
-    const badTags = root.querySelectorAll('style, script, link, meta, title, object, embed, iframe, frame, frameset, svg, canvas, form, input, button, textarea, select, option, base, audio, video, source');
+    for (const styleElement of root.querySelectorAll('style')) {
+        const safeCss = sanitizeStylesheet(styleElement.textContent);
+        safeCss.trim() ? styleElement.textContent = safeCss : styleElement.remove();
+    }
+
+    const badTags = root.querySelectorAll('script, link, meta, title, object, embed, iframe, frame, frameset, svg, canvas, form, input, button, textarea, select, option, base, audio, video, source');
     for (let i = 0; i < badTags.length; i++) {
         badTags[i].remove();
     }
@@ -433,6 +459,7 @@ function updateUI() {
     $('#c2e-user').prop('checked', settings.exportUser);
     $('#c2e-ai').prop('checked', settings.exportAI);
     $('#c2e-hide-ai-name').prop('checked', settings.hideAIName);
+    $('#c2e-external-images').prop('checked', settings.allowExternalImages);
     updateTotalFloors();
 }
 function getTotalFloors() { const ctx = getContextCompat(); return (ctx && ctx.chat) ? ctx.chat.length : 0; }
@@ -464,6 +491,7 @@ function createUI() {
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-user" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-user"> 包含用户</label>
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-robot" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-ai"> 包含 AI</label>
                     <label class="c2e-checkbox-label" style="color:#ffaaaa;"><span class="fa-solid fa-eye-slash" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-hide-ai-name"> 隐藏 AI 名</label>
+                    <label class="c2e-checkbox-label"><span class="fa-solid fa-image" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-external-images"> 允许 HTTPS 外部图片（会连接图片网站）</label>
                 </div>
                 <hr class="c2e-divider">
                 <div class="c2e-section-title">安全导出格式</div>
@@ -480,6 +508,7 @@ function createUI() {
     $('#c2e-user').on('change', function(){ settings.exportUser = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-ai').on('change', function(){ settings.exportAI = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-hide-ai-name').on('change', function(){ settings.hideAIName = $(this).prop('checked'); saveSettingsDebounced(); });
+    $('#c2e-external-images').on('change', function(){ settings.allowExternalImages = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#btn-epub').click(exportEPUB);
     $('#btn-txt').click(exportTXT);
     setInterval(updateTotalFloors, 2000);
