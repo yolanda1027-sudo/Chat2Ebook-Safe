@@ -6,6 +6,7 @@
 
 - 导出 EPUB 与 TXT。
 - 选择楼层范围、是否包含用户或 AI、隐藏 AI 名称。
+- 可选“包含思维链”：导出 SillyTavern 已解析的推理内容（`extra.reasoning`），EPUB 中以灰色引用块显示在正文前，TXT 中以【思维链】标记包裹。会套用作用范围为“推理”的正则，并经过与正文相同的安全清理。
 - EPUB 分章。
 - 继续应用 SillyTavern 的全局、角色卡、当前预设及 TavernHelper 区域正则。
 - 保留安全的 Markdown 与常见排版效果。

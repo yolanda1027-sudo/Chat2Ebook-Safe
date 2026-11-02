@@ -14,7 +14,7 @@ const LIB_SOURCES = {
 const defaultSettings = {
     title: "Chat2Ebook", author: "", exportStart: 0, exportEnd: 99999,
     exportUser: false, exportAI: true, hideAIName: true, chapterSplit: 1,
-    allowExternalImages: false
+    allowExternalImages: false, exportReasoning: false
 };
 
 let settings = {};
@@ -293,7 +293,8 @@ function applyScript(text, script, debugMode = false) {
     } catch (e) { return text; }
 }
 
-function renderText(rawText, isUser, scripts, depth, debugMode = false) {
+// placement: 1 = 用户输入, 2 = AI 输出, 6 = 思维链（与 SillyTavern 正则的作用范围一致）
+function renderText(rawText, isUser, scripts, depth, debugMode = false, placement = null) {
     if (!rawText) return "";
     let text = rawText;
     
@@ -301,7 +302,8 @@ function renderText(rawText, isUser, scripts, depth, debugMode = false) {
 
     scripts.forEach(script => {
         const p = script._placement;
-        const isTarget = (!p || p.length === 0) || (isUser ? p.includes(1) : p.includes(2));
+        const target = placement ?? (isUser ? 1 : 2);
+        const isTarget = (!p || p.length === 0) || p.includes(target);
         
         let depthMatch = true;
         if (script._minDepth !== null && depth < script._minDepth) depthMatch = false;
@@ -345,7 +347,11 @@ function getProcessedData() {
         const htmlContent = renderText(rawMsg.mes || "", isUser, activeScripts, depth, isDebug);
         if (isDebug) debugCounter++;
 
-        data.push({ index: i, speaker: name, isUser: isUser, html: htmlContent, text: rawMsg.mes || "" });
+        // 思维链：SillyTavern 解析后存放在 extra.reasoning
+        const rawReasoning = (settings.exportReasoning && rawMsg.extra && typeof rawMsg.extra.reasoning === 'string') ? rawMsg.extra.reasoning.trim() : "";
+        const reasoningHtml = rawReasoning ? renderText(rawReasoning, isUser, activeScripts, depth, false, 6) : "";
+
+        data.push({ index: i, speaker: name, isUser: isUser, html: htmlContent, reasoningHtml: reasoningHtml, text: rawMsg.mes || "" });
     }
     return data;
 }
@@ -401,7 +407,12 @@ async function exportEPUB() {
                 let speakerLabel = `<strong style="color:${color};display:block;margin-bottom:0.2em;">${escapeHtml(ch.speaker)}:</strong>`;
                 if (settings.hideAIName && !ch.isUser) speakerLabel = '';
                 const safeHtml = fixXHTML(cleanHtml(ch.html, 'epub'));
-                bodyContent += `<div class="msg" style="margin-bottom:1.5em;">${speakerLabel}<div class="text" style="line-height:1.6;">${safeHtml}</div></div>`;
+                let reasoningBlock = '';
+                if (ch.reasoningHtml) {
+                    const safeReasoning = fixXHTML(cleanHtml(ch.reasoningHtml, 'epub'));
+                    if (safeReasoning.trim()) reasoningBlock = `<div class="reasoning" style="margin:0 0 0.8em 0;padding:0.5em 0.8em;border-left:3px solid #999;background:#f4f4f4;color:#666;font-size:0.9em;line-height:1.5;"><p style="margin:0 0 0.3em 0;font-weight:bold;">💭 思维链</p>${safeReasoning}</div>`;
+                }
+                bodyContent += `<div class="msg" style="margin-bottom:1.5em;">${speakerLabel}${reasoningBlock}<div class="text" style="line-height:1.6;">${safeHtml}</div></div>`;
             });
             const xhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${safeTitle}</title><style>body{font-family:sans-serif;padding:5%;}img{max-width:100%;}</style></head><body>${bodyContent}</body></html>`;
             chapterFiles.push({ id: `ch${chapterIndex}`, title: chapterTitle, filename: `chapter${chapterIndex}.xhtml`, content: xhtml });
@@ -443,7 +454,9 @@ function exportTXT() {
     data.forEach(ch => {
         let label = (settings.hideAIName && !ch.isUser) ? "" : `${ch.speaker}:\n`;
         const cleanContent = cleanHtml(ch.html, 'txt');
-        text += `${label}${cleanContent}\n\n${'-'.repeat(20)}\n\n`;
+        const reasoningText = ch.reasoningHtml ? cleanHtml(ch.reasoningHtml, 'txt').trim() : "";
+        const reasoningPart = reasoningText ? `【思维链】\n${reasoningText}\n【思维链结束】\n\n` : "";
+        text += `${label}${reasoningPart}${cleanContent}\n\n${'-'.repeat(20)}\n\n`;
     });
     downloadFile(text, `${safeFilename(settings.title, 'Chat2Ebook')}.txt`, 'text/plain');
     toastr.success('TXT 导出成功');
@@ -460,6 +473,7 @@ function updateUI() {
     $('#c2e-ai').prop('checked', settings.exportAI);
     $('#c2e-hide-ai-name').prop('checked', settings.hideAIName);
     $('#c2e-external-images').prop('checked', settings.allowExternalImages);
+    $('#c2e-reasoning').prop('checked', settings.exportReasoning);
     updateTotalFloors();
 }
 function getTotalFloors() { const ctx = getContextCompat(); return (ctx && ctx.chat) ? ctx.chat.length : 0; }
@@ -491,6 +505,7 @@ function createUI() {
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-user" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-user"> 包含用户</label>
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-robot" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-ai"> 包含 AI</label>
                     <label class="c2e-checkbox-label" style="color:#ffaaaa;"><span class="fa-solid fa-eye-slash" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-hide-ai-name"> 隐藏 AI 名</label>
+                    <label class="c2e-checkbox-label"><span class="fa-solid fa-lightbulb" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-reasoning"> 包含思维链</label>
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-image" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-external-images"> 允许 HTTPS 外部图片（会连接图片网站）</label>
                 </div>
                 <hr class="c2e-divider">
@@ -509,6 +524,7 @@ function createUI() {
     $('#c2e-ai').on('change', function(){ settings.exportAI = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-hide-ai-name').on('change', function(){ settings.hideAIName = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-external-images').on('change', function(){ settings.allowExternalImages = $(this).prop('checked'); saveSettingsDebounced(); });
+    $('#c2e-reasoning').on('change', function(){ settings.exportReasoning = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#btn-epub').click(exportEPUB);
     $('#btn-txt').click(exportTXT);
     setInterval(updateTotalFloors, 2000);
