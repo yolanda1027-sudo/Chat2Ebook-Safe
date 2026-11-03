@@ -14,7 +14,7 @@ const LIB_SOURCES = {
 const defaultSettings = {
     title: "Chat2Ebook", author: "", exportStart: 0, exportEnd: 99999,
     exportUser: false, exportAI: true, hideAIName: true, chapterSplit: 1,
-    allowExternalImages: false, exportReasoning: false
+    allowExternalImages: false, exportReasoning: false, exportSwipes: false
 };
 
 let settings = {};
@@ -351,7 +351,26 @@ function getProcessedData() {
         const rawReasoning = (settings.exportReasoning && rawMsg.extra && typeof rawMsg.extra.reasoning === 'string') ? rawMsg.extra.reasoning.trim() : "";
         const reasoningHtml = rawReasoning ? renderText(rawReasoning, isUser, activeScripts, depth, false, 6) : "";
 
-        data.push({ index: i, speaker: name, isUser: isUser, html: htmlContent, reasoningHtml: reasoningHtml, text: rawMsg.mes || "" });
+        // 其他 swipe 版本：swipes 为全部版本文本，swipe_id 为当前显示的版本（即 mes），swipe_info[k].extra 存放各版本的思维链
+        const alternates = [];
+        if (settings.exportSwipes && Array.isArray(rawMsg.swipes) && rawMsg.swipes.length > 1) {
+            const currentId = Number.isInteger(rawMsg.swipe_id) ? rawMsg.swipe_id : -1;
+            const swipeInfo = Array.isArray(rawMsg.swipe_info) ? rawMsg.swipe_info : [];
+            rawMsg.swipes.forEach((swipeText, k) => {
+                if (k === currentId || typeof swipeText !== 'string' || !swipeText.trim()) return;
+                if (currentId === -1 && swipeText === rawMsg.mes) return;
+                const swipeExtra = swipeInfo[k] && swipeInfo[k].extra;
+                const swipeReasoning = (settings.exportReasoning && swipeExtra && typeof swipeExtra.reasoning === 'string') ? swipeExtra.reasoning.trim() : "";
+                alternates.push({
+                    number: k + 1,
+                    html: renderText(swipeText, isUser, activeScripts, depth, false),
+                    reasoningHtml: swipeReasoning ? renderText(swipeReasoning, isUser, activeScripts, depth, false, 6) : ""
+                });
+            });
+        }
+        const swipeTotal = Array.isArray(rawMsg.swipes) ? rawMsg.swipes.length : 1;
+
+        data.push({ index: i, speaker: name, isUser: isUser, html: htmlContent, reasoningHtml: reasoningHtml, alternates: alternates, swipeTotal: swipeTotal, text: rawMsg.mes || "" });
     }
     return data;
 }
@@ -390,6 +409,13 @@ async function exportEPUB() {
         return html.replace(/<br\s*\/?>/gi, "<br />").replace(/<hr\s*\/?>/gi, "<hr />").replace(/<img([^>]*)>/gi, (m,c)=>c.trim().endsWith('/')?m:`<img${c} />`);
     };
 
+    const buildReasoningBlock = (reasoningHtml) => {
+        if (!reasoningHtml) return '';
+        const safeReasoning = fixXHTML(cleanHtml(reasoningHtml, 'epub'));
+        if (!safeReasoning.trim()) return '';
+        return `<div class="reasoning" style="margin:0 0 0.8em 0;padding:0.5em 0.8em;border-left:3px solid #999;background:#f4f4f4;color:#666;font-size:0.9em;line-height:1.5;"><p style="margin:0 0 0.3em 0;font-weight:bold;">💭 思维链</p>${safeReasoning}</div>`;
+    };
+
     const coverXhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Cover</title><style>body{text-align:center;margin-top:30%;font-family:sans-serif;}</style></head><body><h1 style="font-size:2.5em;margin-bottom:0.5em;">${safeTitle}</h1><p style="font-size:1.5em;color:#555;">${safeAuthor}</p></body></html>`;
     const infoXhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Info</title><style>body{padding:10%;font-family:sans-serif;line-height:1.8;}</style></head><body><h2 style="border-bottom:1px solid #ccc;padding-bottom:10px;">书籍信息</h2><p><strong>书名：</strong> ${safeTitle}</p><p><strong>作者：</strong> ${safeAuthor}</p><p><strong>章节数：</strong> 共 ${estimatedChapters} 章 (${chaptersData.length} 条对话)</p><p><strong>总字数：</strong> 约 ${totalWords} 字</p><p><strong>导出时间：</strong> ${escapeHtml(dateStr)}</p><p><strong>生成工具：</strong> Chat2Ebook Safe</p></body></html>`;
     let currentMsgs = [];
@@ -407,12 +433,14 @@ async function exportEPUB() {
                 let speakerLabel = `<strong style="color:${color};display:block;margin-bottom:0.2em;">${escapeHtml(ch.speaker)}:</strong>`;
                 if (settings.hideAIName && !ch.isUser) speakerLabel = '';
                 const safeHtml = fixXHTML(cleanHtml(ch.html, 'epub'));
-                let reasoningBlock = '';
-                if (ch.reasoningHtml) {
-                    const safeReasoning = fixXHTML(cleanHtml(ch.reasoningHtml, 'epub'));
-                    if (safeReasoning.trim()) reasoningBlock = `<div class="reasoning" style="margin:0 0 0.8em 0;padding:0.5em 0.8em;border-left:3px solid #999;background:#f4f4f4;color:#666;font-size:0.9em;line-height:1.5;"><p style="margin:0 0 0.3em 0;font-weight:bold;">💭 思维链</p>${safeReasoning}</div>`;
-                }
-                bodyContent += `<div class="msg" style="margin-bottom:1.5em;">${speakerLabel}${reasoningBlock}<div class="text" style="line-height:1.6;">${safeHtml}</div></div>`;
+                const reasoningBlock = buildReasoningBlock(ch.reasoningHtml);
+                let swipeBlocks = '';
+                (ch.alternates || []).forEach(alt => {
+                    const altHtml = fixXHTML(cleanHtml(alt.html, 'epub'));
+                    if (!altHtml.trim()) return;
+                    swipeBlocks += `<div class="swipe" style="margin:1em 0 0 0;padding:0.6em 0.8em;border:1px dashed #b0a080;border-radius:4px;background:#fbf8f0;"><p style="margin:0 0 0.4em 0;font-size:0.85em;font-weight:bold;color:#8a6d3b;">🔀 其他版本 ${alt.number} / ${ch.swipeTotal}</p>${buildReasoningBlock(alt.reasoningHtml)}<div class="text" style="line-height:1.6;">${altHtml}</div></div>`;
+                });
+                bodyContent += `<div class="msg" style="margin-bottom:1.5em;">${speakerLabel}${reasoningBlock}<div class="text" style="line-height:1.6;">${safeHtml}</div>${swipeBlocks}</div>`;
             });
             const xhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${safeTitle}</title><style>body{font-family:sans-serif;padding:5%;}img{max-width:100%;}</style></head><body>${bodyContent}</body></html>`;
             chapterFiles.push({ id: `ch${chapterIndex}`, title: chapterTitle, filename: `chapter${chapterIndex}.xhtml`, content: xhtml });
@@ -456,7 +484,14 @@ function exportTXT() {
         const cleanContent = cleanHtml(ch.html, 'txt');
         const reasoningText = ch.reasoningHtml ? cleanHtml(ch.reasoningHtml, 'txt').trim() : "";
         const reasoningPart = reasoningText ? `【思维链】\n${reasoningText}\n【思维链结束】\n\n` : "";
-        text += `${label}${reasoningPart}${cleanContent}\n\n${'-'.repeat(20)}\n\n`;
+        let swipePart = "";
+        (ch.alternates || []).forEach(alt => {
+            const altText = cleanHtml(alt.html, 'txt').trim();
+            if (!altText) return;
+            const altReasoning = alt.reasoningHtml ? cleanHtml(alt.reasoningHtml, 'txt').trim() : "";
+            swipePart += `\n\n【其他版本 ${alt.number} / ${ch.swipeTotal}】\n${altReasoning ? `【思维链】\n${altReasoning}\n【思维链结束】\n\n` : ""}${altText}`;
+        });
+        text += `${label}${reasoningPart}${cleanContent}${swipePart}\n\n${'-'.repeat(20)}\n\n`;
     });
     downloadFile(text, `${safeFilename(settings.title, 'Chat2Ebook')}.txt`, 'text/plain');
     toastr.success('TXT 导出成功');
@@ -474,6 +509,7 @@ function updateUI() {
     $('#c2e-hide-ai-name').prop('checked', settings.hideAIName);
     $('#c2e-external-images').prop('checked', settings.allowExternalImages);
     $('#c2e-reasoning').prop('checked', settings.exportReasoning);
+    $('#c2e-swipes').prop('checked', settings.exportSwipes);
     updateTotalFloors();
 }
 function getTotalFloors() { const ctx = getContextCompat(); return (ctx && ctx.chat) ? ctx.chat.length : 0; }
@@ -506,6 +542,7 @@ function createUI() {
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-robot" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-ai"> 包含 AI</label>
                     <label class="c2e-checkbox-label" style="color:#ffaaaa;"><span class="fa-solid fa-eye-slash" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-hide-ai-name"> 隐藏 AI 名</label>
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-lightbulb" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-reasoning"> 包含思维链</label>
+                    <label class="c2e-checkbox-label"><span class="fa-solid fa-shuffle" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-swipes"> 包含其他 swipe 版本</label>
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-image" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-external-images"> 允许 HTTPS 外部图片（会连接图片网站）</label>
                 </div>
                 <hr class="c2e-divider">
@@ -525,6 +562,7 @@ function createUI() {
     $('#c2e-hide-ai-name').on('change', function(){ settings.hideAIName = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-external-images').on('change', function(){ settings.allowExternalImages = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-reasoning').on('change', function(){ settings.exportReasoning = $(this).prop('checked'); saveSettingsDebounced(); });
+    $('#c2e-swipes').on('change', function(){ settings.exportSwipes = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#btn-epub').click(exportEPUB);
     $('#btn-txt').click(exportTXT);
     setInterval(updateTotalFloors, 2000);
