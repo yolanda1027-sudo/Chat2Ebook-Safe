@@ -14,7 +14,7 @@ const LIB_SOURCES = {
 const defaultSettings = {
     title: "Chat2Ebook", author: "", exportStart: 0, exportEnd: 99999,
     exportUser: false, exportAI: true, hideAIName: true, chapterSplit: 1,
-    allowExternalImages: false, exportReasoning: false, exportSwipes: false
+    allowExternalImages: false, exportReasoning: false, exportSwipes: false, extrasDisplay: 'popup'
 };
 
 let settings = {};
@@ -416,6 +416,8 @@ async function exportEPUB() {
         return `<div class="reasoning" style="margin:0 0 0.8em 0;padding:0.5em 0.8em;border-left:3px solid #999;background:#f4f4f4;color:#666;font-size:0.9em;line-height:1.5;"><p style="margin:0 0 0.3em 0;font-weight:bold;">💭 思维链</p>${safeReasoning}</div>`;
     };
 
+    const usePopup = settings.extrasDisplay !== 'inline';
+
     const coverXhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Cover</title><style>body{text-align:center;margin-top:30%;font-family:sans-serif;}</style></head><body><h1 style="font-size:2.5em;margin-bottom:0.5em;">${safeTitle}</h1><p style="font-size:1.5em;color:#555;">${safeAuthor}</p></body></html>`;
     const infoXhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Info</title><style>body{padding:10%;font-family:sans-serif;line-height:1.8;}</style></head><body><h2 style="border-bottom:1px solid #ccc;padding-bottom:10px;">书籍信息</h2><p><strong>书名：</strong> ${safeTitle}</p><p><strong>作者：</strong> ${safeAuthor}</p><p><strong>章节数：</strong> 共 ${estimatedChapters} 章 (${chaptersData.length} 条对话)</p><p><strong>总字数：</strong> 约 ${totalWords} 字</p><p><strong>导出时间：</strong> ${escapeHtml(dateStr)}</p><p><strong>生成工具：</strong> Chat2Ebook Safe</p></body></html>`;
     let currentMsgs = [];
@@ -428,11 +430,13 @@ async function exportEPUB() {
             let bodyContent = '';
             const chapterTitle = `第 ${chapterIndex} 章`;
             if (splitCount > 1 || chapterIndex === 1) bodyContent += `<h2 style="text-align:center;margin-bottom:1.5em;color:#555">${chapterTitle}</h2><hr/>`;
+            let notesContent = '';
             currentMsgs.forEach(ch => {
                 const color = ch.isUser ? "#2c3e50" : "#800000";
                 let speakerLabel = `<strong style="color:${color};display:block;margin-bottom:0.2em;">${escapeHtml(ch.speaker)}:</strong>`;
                 if (settings.hideAIName && !ch.isUser) speakerLabel = '';
                 const safeHtml = fixXHTML(cleanHtml(ch.html, 'epub'));
+                const msgId = `m${ch.index}`;
                 const reasoningBlock = buildReasoningBlock(ch.reasoningHtml);
                 let swipeBlocks = '';
                 (ch.alternates || []).forEach(alt => {
@@ -440,9 +444,24 @@ async function exportEPUB() {
                     if (!altHtml.trim()) return;
                     swipeBlocks += `<div class="swipe" style="margin:1em 0 0 0;padding:0.6em 0.8em;border:1px dashed #b0a080;border-radius:4px;background:#fbf8f0;"><p style="margin:0 0 0.4em 0;font-size:0.85em;font-weight:bold;color:#8a6d3b;">🔀 其他版本 ${alt.number} / ${ch.swipeTotal}</p>${buildReasoningBlock(alt.reasoningHtml)}<div class="text" style="line-height:1.6;">${altHtml}</div></div>`;
                 });
-                bodyContent += `<div class="msg" style="margin-bottom:1.5em;">${speakerLabel}${reasoningBlock}<div class="text" style="line-height:1.6;">${safeHtml}</div>${swipeBlocks}</div>`;
+
+                if (usePopup) {
+                    // 弹窗模式：正文只留一行小链接，内容放进章节末尾的 EPUB3 脚注（支持的阅读器会以弹窗显示）
+                    const links = [];
+                    const addNote = (noteId, label, inner) => {
+                        links.push(`<a epub:type="noteref" role="doc-noteref" href="#${noteId}" style="text-decoration:none;color:#8a6d3b;">${label}</a>`);
+                        notesContent += `<aside epub:type="footnote" role="doc-footnote" id="${noteId}" style="margin:1.5em 0;"><p style="margin:0 0 0.4em 0;"><a href="#${msgId}" style="font-size:0.85em;color:#888;text-decoration:none;">↩ 返回正文（第 ${ch.index} 楼）</a></p>${inner}</aside>`;
+                    };
+                    if (reasoningBlock) addNote(`r${ch.index}`, '💭 思维链', reasoningBlock);
+                    if (swipeBlocks) addNote(`s${ch.index}`, `🔀 其他版本（${ch.alternates.length}）`, swipeBlocks);
+                    const linkBar = links.length ? `<p class="extras" style="margin:0.4em 0 0 0;font-size:0.85em;">${links.join('　')}</p>` : '';
+                    bodyContent += `<div class="msg" id="${msgId}" style="margin-bottom:1.5em;">${speakerLabel}<div class="text" style="line-height:1.6;">${safeHtml}</div>${linkBar}</div>`;
+                } else {
+                    bodyContent += `<div class="msg" id="${msgId}" style="margin-bottom:1.5em;">${speakerLabel}${reasoningBlock}<div class="text" style="line-height:1.6;">${safeHtml}</div>${swipeBlocks}</div>`;
+                }
             });
-            const xhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${safeTitle}</title><style>body{font-family:sans-serif;padding:5%;}img{max-width:100%;}</style></head><body>${bodyContent}</body></html>`;
+            if (notesContent) bodyContent += `<hr style="margin-top:3em;"/><section class="notes" style="font-size:0.95em;">${notesContent}</section>`;
+            const xhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN" xml:lang="zh-CN"><head><meta charset="utf-8"/><title>${safeTitle}</title><style>body{font-family:sans-serif;padding:5%;}img{max-width:100%;}</style></head><body>${bodyContent}</body></html>`;
             chapterFiles.push({ id: `ch${chapterIndex}`, title: chapterTitle, filename: `chapter${chapterIndex}.xhtml`, content: xhtml });
             currentMsgs = [];
             chapterIndex++;
@@ -453,17 +472,20 @@ async function exportEPUB() {
     const oebps = zip.folder("OEBPS");
     oebps.file("cover.xhtml", coverXhtml);
     oebps.file("info.xhtml", infoXhtml);
-    let manifest = `<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/><item id="info" href="info.xhtml" media-type="application/xhtml+xml"/>`;
+    let manifest = `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/><item id="info" href="info.xhtml" media-type="application/xhtml+xml"/>`;
     let spine = `<itemref idref="cover"/><itemref idref="info"/>`;
+    let navList = `<li><a href="cover.xhtml">封面</a></li><li><a href="info.xhtml">信息页</a></li>`;
     let navMap = `<navPoint id="nav_cover" playOrder="0"><navLabel><text>封面</text></navLabel><content src="cover.xhtml"/></navPoint><navPoint id="nav_info" playOrder="0"><navLabel><text>信息页</text></navLabel><content src="info.xhtml"/></navPoint>`;
     chapterFiles.forEach((ch, idx) => {
         manifest += `<item id="${ch.id}" href="${ch.filename}" media-type="application/xhtml+xml"/>`;
         spine += `<itemref idref="${ch.id}"/>`;
+        navList += `<li><a href="${ch.filename}">${ch.title}</a></li>`;
         navMap += `<navPoint id="nav${idx+1}" playOrder="${idx+1}"><navLabel><text>${ch.title}</text></navLabel><content src="${ch.filename}"/></navPoint>`;
         oebps.file(ch.filename, ch.content);
     });
-    const opf = `<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookID" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${safeTitle}</dc:title><dc:creator>${safeAuthor}</dc:creator><dc:language>zh-CN</dc:language><dc:identifier id="BookID">${uuid}</dc:identifier></metadata><manifest>${manifest}</manifest><spine toc="ncx">${spine}</spine></package>`;
+    const opf = `<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookID" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><meta property="dcterms:modified">${new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')}</meta><dc:title>${safeTitle}</dc:title><dc:creator>${safeAuthor}</dc:creator><dc:language>zh-CN</dc:language><dc:identifier id="BookID">${uuid}</dc:identifier></metadata><manifest>${manifest}</manifest><spine toc="ncx">${spine}</spine></package>`;
     oebps.file("content.opf", opf);
+    oebps.file("nav.xhtml", `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN" xml:lang="zh-CN"><head><meta charset="utf-8"/><title>${safeTitle}</title></head><body><nav epub:type="toc" id="toc"><h1>目录</h1><ol>${navList}</ol></nav></body></html>`);
     oebps.file("toc.ncx", `<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="${uuid}"/></head><docTitle><text>${safeTitle}</text></docTitle><navMap>${navMap}</navMap></ncx>`);
     zip.generateAsync({ type: "blob" }).then(c => downloadFile(c, `${safeFilename(title, 'Chat2Ebook')}.epub`, "application/epub+zip"));
     toastr.success(`EPUB 导出成功`);
@@ -510,6 +532,7 @@ function updateUI() {
     $('#c2e-external-images').prop('checked', settings.allowExternalImages);
     $('#c2e-reasoning').prop('checked', settings.exportReasoning);
     $('#c2e-swipes').prop('checked', settings.exportSwipes);
+    $('#c2e-extras-display').val(settings.extrasDisplay === 'inline' ? 'inline' : 'popup');
     updateTotalFloors();
 }
 function getTotalFloors() { const ctx = getContextCompat(); return (ctx && ctx.chat) ? ctx.chat.length : 0; }
@@ -536,7 +559,7 @@ function createUI() {
                 <div id="c2e-total-count" style="text-align:center; margin-bottom:15px; background:rgba(0,0,0,0.2); padding:8px; border-radius:4px; font-size:0.9em;">统计中...</div>
                 <div class="c2e-grid"><div class="c2e-input-group"><label>书名</label><input type="text" id="c2e-title" class="text_pole"></div><div class="c2e-input-group"><label>作者</label><input type="text" id="c2e-author" class="text_pole" placeholder="默认使用用户名"></div></div>
                 <div class="c2e-grid"><div class="c2e-input-group"><label>起始楼层</label><input type="number" id="c2e-start" class="text_pole"></div><div class="c2e-input-group"><label>结束楼层</label><input type="number" id="c2e-end" class="text_pole"></div></div>
-                <div class="c2e-grid"><div class="c2e-input-group"><label>EPUB 分章 (每章楼层数)</label><input type="number" id="c2e-chapter-split" class="text_pole" placeholder="默认 1"></div></div>
+                <div class="c2e-grid"><div class="c2e-input-group"><label>EPUB 分章 (每章楼层数)</label><input type="number" id="c2e-chapter-split" class="text_pole" placeholder="默认 1"></div><div class="c2e-input-group"><label>EPUB 思维链/swipe 显示</label><select id="c2e-extras-display" class="text_pole"><option value="popup">弹窗（点链接查看）</option><option value="inline">直接展开</option></select></div></div>
                 <div class="c2e-vertical-group">
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-user" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-user"> 包含用户</label>
                     <label class="c2e-checkbox-label"><span class="fa-solid fa-robot" style="width:16px; text-align:center;"></span><input type="checkbox" id="c2e-ai"> 包含 AI</label>
@@ -562,6 +585,7 @@ function createUI() {
     $('#c2e-hide-ai-name').on('change', function(){ settings.hideAIName = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-external-images').on('change', function(){ settings.allowExternalImages = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#c2e-reasoning').on('change', function(){ settings.exportReasoning = $(this).prop('checked'); saveSettingsDebounced(); });
+    $('#c2e-extras-display').on('change', function(){ settings.extrasDisplay = $(this).val(); saveSettingsDebounced(); });
     $('#c2e-swipes').on('change', function(){ settings.exportSwipes = $(this).prop('checked'); saveSettingsDebounced(); });
     $('#btn-epub').click(exportEPUB);
     $('#btn-txt').click(exportTXT);
