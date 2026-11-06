@@ -11,6 +11,11 @@
 - EPUB 中思维链与 swipe 的显示方式可选：
   - **弹窗（默认）**：正文下方只显示「💭 思维链」「🔀 其他版本（N）」小链接，内容放在章节末尾的 EPUB3 脚注里。支持弹窗脚注的阅读器（如 Apple Books）点击后会以弹窗显示；不支持的阅读器会跳到章节末尾，点「↩ 返回正文」即可回来。
   - **直接展开**：与正文一起显示。
+- EPUB 页面按 XHTML 严格规则输出，避免阅读器出现「This page contains the following errors」红框：
+  - 思维链一律当纯文字：内容里的 `&` `<` `>` 全部转义，`<writing_style:japanese>` 这类标签会原样显示成文字（Markdown 标题、粗体等排版仍保留）。
+  - 正文使用标签白名单：p、span、div、details、table、img 等常用排版标签照常保留；白名单以外或名称带冒号的标签（如 `<user_input>`、`<writing_style: …>`）转成文字显示，不会被删掉。
+  - `<br>` `<hr>` `<img>` 输出为自闭合，`&nbsp;` 等 HTML 实体转成实际字符，单独的 `<`、`&` 自动转义。
+  - 每一章写入前会以 `application/xhtml+xml` 再解析一次；若仍有错误，该章改用纯文字导出，并在导出完成时提示「第 X 章有格式问题，已用纯文字导出」。
 - EPUB 现以 EPUB 3 格式输出，并保留 toc.ncx 以兼容旧阅读器。
 - EPUB 分章。
 - 继续应用 SillyTavern 的全局、角色卡、当前预设及 TavernHelper 区域正则。

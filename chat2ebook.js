@@ -123,10 +123,52 @@ function sanitizeStylesheet(value) {
 }
 
 // 保留常见排版，但移除可执行内容、自动联网资源和危险 URL。
+// 允许保留的 HTML 标签（状态栏、装饰栏等美化会用到）。
+const ALLOWED_TAGS = new Set([
+    'p', 'br', 'span', 'div', 'b', 'i', 'em', 'strong', 'u', 's', 'strike', 'del', 'ins', 'sub', 'sup', 'small', 'big', 'mark',
+    'q', 'cite', 'abbr', 'dfn', 'code', 'pre', 'kbd', 'samp', 'var', 'tt', 'blockquote', 'details', 'summary',
+    'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'table', 'caption', 'colgroup', 'col', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+    'img', 'a', 'font', 'center', 'ruby', 'rb', 'rt', 'rp', 'wbr', 'time', 'label', 'bdi', 'bdo',
+    'section', 'article', 'header', 'footer', 'aside', 'nav', 'main', 'figure', 'figcaption', 'style'
+]);
+// 已知的 HTML 标签但不安全或无法用于 EPUB：保留为标签，随后在 cleanHtml 中整段删除（与之前的行为一致）。
+const REMOVED_TAGS = new Set([
+    'script', 'link', 'meta', 'title', 'object', 'embed', 'iframe', 'frame', 'frameset', 'svg', 'math', 'canvas', 'form',
+    'input', 'button', 'textarea', 'select', 'option', 'optgroup', 'base', 'audio', 'video', 'source', 'track',
+    'template', 'noscript', 'head', 'html', 'body', 'dialog', 'picture', 'map', 'area', 'param'
+]);
+
+// 白名单以外的标签（例如 <writing_style:japanese>、<user_input>）以及单独出现的 < 转成文字显示，不当作标签解析。
+function escapeUnknownTags(html) {
+    return String(html ?? '').replace(/<!--[\s\S]*?-->|<\/?[A-Za-z][^<>]*>|</g, token => {
+        if (token === '<') return '&lt;';
+        if (token.startsWith('<!--')) return token;
+        const name = (token.match(/^<\/?([^\s\/>]+)/) || [])[1] || '';
+        const lower = name.toLowerCase();
+        if (!name.includes(':') && (ALLOWED_TAGS.has(lower) || REMOVED_TAGS.has(lower))) return token;
+        return token.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    });
+}
+
+// XML 不允许的控制字符会让整页解析失败。
+function stripInvalidXmlChars(value) {
+    return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '');
+}
+
+// 以 XML 规则输出：<br/> 自闭合、&nbsp; 输出为实际字符、单独的 & < > 自动转义。
+function serializeXhtml(root) {
+    const serializer = new XMLSerializer();
+    return Array.from(root.childNodes)
+        .map(node => serializer.serializeToString(node))
+        .join('')
+        .replace(/(<[A-Za-z][^>]*?) xmlns="http:\/\/www\.w3\.org\/1999\/xhtml"/g, '$1');
+}
+
 function cleanHtml(htmlContent, mode = 'epub') {
     // template 的内容不会进入活动文档，清理完成前不触发脚本或资源加载。
     const template = document.createElement('template');
-    template.innerHTML = String(htmlContent || '');
+    template.innerHTML = escapeUnknownTags(stripInvalidXmlChars(htmlContent || ''));
     const root = template.content;
     
     for (const styleElement of root.querySelectorAll('style')) {
@@ -134,10 +176,26 @@ function cleanHtml(htmlContent, mode = 'epub') {
         safeCss.trim() ? styleElement.textContent = safeCss : styleElement.remove();
     }
 
-    const badTags = root.querySelectorAll('script, link, meta, title, object, embed, iframe, frame, frameset, svg, canvas, form, input, button, textarea, select, option, base, audio, video, source');
+    const badTags = root.querySelectorAll([...REMOVED_TAGS].join(', '));
     for (let i = 0; i < badTags.length; i++) {
         badTags[i].remove();
     }
+
+    // 保险：仍不在白名单内的元素（理论上不会出现）改成文字，保留其内容。
+    for (const element of [...root.querySelectorAll('*')]) {
+        if (!element.isConnected && !root.contains(element)) continue;
+        const tag = element.localName;
+        if (ALLOWED_TAGS.has(tag)) continue;
+        const frag = document.createDocumentFragment();
+        frag.append(document.createTextNode(`<${tag}>`), ...element.childNodes, document.createTextNode(`</${tag}>`));
+        element.replaceWith(frag);
+    }
+
+    // 注释里的 "--" 在 XML 中不合法，直接移除。
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+    const comments = [];
+    while (walker.nextNode()) comments.push(walker.currentNode);
+    comments.forEach(c => c.remove());
     
     const allElements = root.querySelectorAll('*');
     for (const element of allElements) {
@@ -164,7 +222,7 @@ function cleanHtml(htmlContent, mode = 'epub') {
         textHolder.appendChild(root.cloneNode(true));
         return textHolder.innerText.trim();
     }
-    return template.innerHTML.trim();
+    return serializeXhtml(root).trim();
 }
 
 // ==========================================
@@ -294,7 +352,8 @@ function applyScript(text, script, debugMode = false) {
 }
 
 // placement: 1 = 用户输入, 2 = AI 输出, 6 = 思维链（与 SillyTavern 正则的作用范围一致）
-function renderText(rawText, isUser, scripts, depth, debugMode = false, placement = null) {
+// plainText = true：正则处理后把 & < > 全部转义，内容里的任何标签都只当文字显示（用于思维链）。
+function renderText(rawText, isUser, scripts, depth, debugMode = false, placement = null, plainText = false) {
     if (!rawText) return "";
     let text = rawText;
     
@@ -313,6 +372,8 @@ function renderText(rawText, isUser, scripts, depth, debugMode = false, placemen
             text = applyScript(text, script, debugMode);
         }
     });
+
+    if (plainText) text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     const converter = new showdown.Converter({ simpleLineBreaks: true, strikethrough: true, emoji: true, tables: true, literalMidWordUnderscores: true });
     let html = converter.makeHtml(text);
@@ -349,7 +410,7 @@ function getProcessedData() {
 
         // 思维链：SillyTavern 解析后存放在 extra.reasoning
         const rawReasoning = (settings.exportReasoning && rawMsg.extra && typeof rawMsg.extra.reasoning === 'string') ? rawMsg.extra.reasoning.trim() : "";
-        const reasoningHtml = rawReasoning ? renderText(rawReasoning, isUser, activeScripts, depth, false, 6) : "";
+        const reasoningHtml = rawReasoning ? renderText(rawReasoning, isUser, activeScripts, depth, false, 6, true) : "";
 
         // 其他 swipe 版本：swipes 为全部版本文本，swipe_id 为当前显示的版本（即 mes），swipe_info[k].extra 存放各版本的思维链
         const alternates = [];
@@ -364,7 +425,7 @@ function getProcessedData() {
                 alternates.push({
                     number: k + 1,
                     html: renderText(swipeText, isUser, activeScripts, depth, false),
-                    reasoningHtml: swipeReasoning ? renderText(swipeReasoning, isUser, activeScripts, depth, false, 6) : ""
+                    reasoningHtml: swipeReasoning ? renderText(swipeReasoning, isUser, activeScripts, depth, false, 6, true) : ""
                 });
             });
         }
@@ -386,6 +447,36 @@ function countTotalWords(data) {
         }
     }); 
     return c; 
+}
+
+// --- XHTML 校验与纯文字退路 ---
+function isValidXhtml(xhtml) {
+    try {
+        const doc = new DOMParser().parseFromString(xhtml, 'application/xhtml+xml');
+        return doc.getElementsByTagName('parsererror').length === 0;
+    } catch (e) { return false; }
+}
+
+function textToParagraphs(text) {
+    return String(text || '').split(/\n+/).map(line => line.trim()).filter(Boolean)
+        .map(line => `<p>${escapeHtml(stripInvalidXmlChars(line))}</p>`).join('');
+}
+
+function buildPlainTextChapter(msgs, chapterTitle) {
+    let out = `<h2 style="text-align:center;margin-bottom:1.5em;color:#555">${escapeHtml(chapterTitle)}</h2><p style="color:#a66;font-size:0.85em;">（本章含有无法解析的格式，已改为纯文字显示）</p><hr/>`;
+    msgs.forEach(ch => {
+        const label = (settings.hideAIName && !ch.isUser) ? '' : `<p><strong>${escapeHtml(ch.speaker)}:</strong></p>`;
+        let block = label;
+        if (ch.reasoningHtml) block += `<p>【思维链】</p>${textToParagraphs(cleanHtml(ch.reasoningHtml, 'txt'))}<p>【思维链结束】</p>`;
+        block += textToParagraphs(cleanHtml(ch.html, 'txt'));
+        (ch.alternates || []).forEach(alt => {
+            block += `<p>【其他版本 ${alt.number} / ${ch.swipeTotal}】</p>`;
+            if (alt.reasoningHtml) block += `<p>【思维链】</p>${textToParagraphs(cleanHtml(alt.reasoningHtml, 'txt'))}<p>【思维链结束】</p>`;
+            block += textToParagraphs(cleanHtml(alt.html, 'txt'));
+        });
+        out += `<div style="margin-bottom:1.5em;">${block}</div>`;
+    });
+    return out;
 }
 
 // --- Exports ---
@@ -423,6 +514,7 @@ async function exportEPUB() {
     let currentMsgs = [];
     let chapterIndex = 1;
     const chapterFiles = [];
+    const failedChapters = [];
     
     for (let i = 0; i < chaptersData.length; i++) {
         currentMsgs.push(chaptersData[i]);
@@ -461,7 +553,13 @@ async function exportEPUB() {
                 }
             });
             if (notesContent) bodyContent += `<hr style="margin-top:3em;"/><section class="notes" style="font-size:0.95em;">${notesContent}</section>`;
-            const xhtml = `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN" xml:lang="zh-CN"><head><meta charset="utf-8"/><title>${safeTitle}</title><style>body{font-family:sans-serif;padding:5%;}img{max-width:100%;}</style></head><body>${bodyContent}</body></html>`;
+            const wrapPage = (content) => `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN" xml:lang="zh-CN"><head><meta charset="utf-8"/><title>${safeTitle}</title><style>body{font-family:sans-serif;padding:5%;}img{max-width:100%;}</style></head><body>${content}</body></html>`;
+            let xhtml = wrapPage(bodyContent);
+            if (!isValidXhtml(xhtml)) {
+                // 保险：这一页仍无法按 XHTML 解析时，整页退回纯文字版本，避免阅读器显示红框并截断内容。
+                xhtml = wrapPage(buildPlainTextChapter(currentMsgs, chapterTitle));
+                failedChapters.push(chapterIndex);
+            }
             chapterFiles.push({ id: `ch${chapterIndex}`, title: chapterTitle, filename: `chapter${chapterIndex}.xhtml`, content: xhtml });
             currentMsgs = [];
             chapterIndex++;
@@ -489,6 +587,7 @@ async function exportEPUB() {
     oebps.file("toc.ncx", `<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="${uuid}"/></head><docTitle><text>${safeTitle}</text></docTitle><navMap>${navMap}</navMap></ncx>`);
     zip.generateAsync({ type: "blob" }).then(c => downloadFile(c, `${safeFilename(title, 'Chat2Ebook')}.epub`, "application/epub+zip"));
     toastr.success(`EPUB 导出成功`);
+    if (failedChapters.length) toastr.warning(`第 ${failedChapters.join('、')} 章有格式问题，已用纯文字导出`);
 }
 
 function exportTXT() {
